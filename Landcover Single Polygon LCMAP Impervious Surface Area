@@ -1,0 +1,90 @@
+//This code extracts developed area within shapefile featues from the LCMAP dataset
+//Area in csv is in m2
+//Change lines 7 and 67, 76-79
+// LCMAP data is from here https://gee-community-catalog.org/projects/lcmap/ 
+// check website for year updates
+// 
+// Input is a single polygon/shapefile of roi
+//
+// Output is a csv of impervious surface area time series for the roi
+
+// select the shapefile you want to run, can be one feature or multiple
+var aoi = wholePreserve_V04//HUC125km
+var folderName = 'Templates' // <-- change destination folder name here
+var fileName = 'ShorelandsDevelopedAreaWholePreserve5km_V04'// <-- change file name here
+var column = ["Name","Shape_Area"]// <- These are the column names from your input shapefile that you want in the exported csv. 
+//*************
+//LCMAP
+//*************
+var lcpritest= ee.ImageCollection("projects/sat-io/open-datasets/LCMAP/LCPRI").map(function(image){
+  var clipped = image.clip(aoi)
+  return clipped
+})
+print(lcpritest)
+
+//LCMap Goes from 1985-2020
+var lcpri= ee.ImageCollection("projects/sat-io/open-datasets/LCMAP/LCPRI").map(function(image){
+  var clipped = image.clip(aoi)
+  var developed = clipped.eq(1)
+  return clipped.updateMask(developed)
+})
+print(lcpri,"LCMAP lcpri")
+
+//***************************************
+// Check specific years, display on map
+//**************************************
+
+// Map.addLayer(lcpri.filter(ee.Filter.calendarRange(1994, 1994, 'year')),{},"LC1994")
+// Map.addLayer(lcpri.filter(ee.Filter.calendarRange(2003, 2003, 'year')),{},"LC2003")
+// Map.addLayer(lcpri.filter(ee.Filter.calendarRange(2005, 2005, 'year')),{},"LC2005")
+// Map.addLayer(lcpri.filter(ee.Filter.calendarRange(2008, 2008, 'year')),{},"LC2008")
+// Map.addLayer(lcpri.filter(ee.Filter.calendarRange(2009, 2009, 'year')),{},"LC2009")
+// Map.addLayer(lcpri.filter(ee.Filter.calendarRange(2010, 2010, 'year')),{},"LC2010")
+// Map.addLayer(lcpri.filter(ee.Filter.calendarRange(2011, 2011, 'year')),{},"LC2011")
+// Map.addLayer(lcpri.filter(ee.Filter.calendarRange(2012, 2012, 'year')),{},"LC2012")
+// Map.addLayer(lcpri.filter(ee.Filter.calendarRange(2013, 2013, 'year')),{},"LC2013")
+// Map.addLayer(lcpri.filter(ee.Filter.calendarRange(2014, 2014, 'year')),{},"LC2014")
+// Map.addLayer(lcpri.filter(ee.Filter.calendarRange(2015, 2015, 'year')),{},"LC2015")
+// Map.addLayer(lcpri.filter(ee.Filter.calendarRange(2016, 2016, 'year')),{},"LC2016")
+//Map.addLayer(lcpri.filter(ee.Filter.calendarRange(2017, 2017, 'year')),{},"LC2017")
+//Map.addLayer(lcpri.filter(ee.Filter.calendarRange(2018, 2018, 'year')),{},"LC2018")
+Map.addLayer(lcpri.filter(ee.Filter.calendarRange(2019, 2019, 'year')),{},"LC2019")
+Map.addLayer(lcpri.filter(ee.Filter.calendarRange(2020, 2020, 'year')),{},"LC2020")
+// Map.addLayer(lcpri.first())
+
+//**********
+//Calculate area
+//**********
+print('LCMAP',lcpri.first().projection())//.nominalScale())
+print('aoi',aoi.geometry().projection())//.nominalScale())
+
+var areaLCMAP = lcpri.map(function(image){
+  return image.gt(0).multiply(ee.Image.pixelArea())//.divide(10000)
+})
+print(areaLCMAP,"areaLCMap")
+
+
+var areaByYear = lcpri.map(function (image){
+  var mask2 = image
+  var imgArea = ee.Image.pixelArea().mask(mask2)
+    .reduceRegions({ 
+      reducer: ee.Reducer.sum(), 
+      collection:aoi,//.geometry(), 
+      scale: 30,
+      crs: 'EPSG:5070',//put projection you want (26912 is UTM 12/NAD83). I recommend Albers or UTM zone 12n since calculating area
+      })
+      return imgArea.map(function (feature) { return feature.set("date", image.get('system:index'))})
+      
+}).flatten()
+print(areaByYear,"areaByYear")
+
+
+Export.table.toDrive({
+  folder: folderName, 
+  collection: areaByYear,
+  description:fileName,
+  selectors:["system:index",column,"date","sum"],//"Shape_Area",
+  //selectors:["system:index","Shape_Area","VegClass","date","sum"],
+  //selectors:["AreaAcres","AreaSqKm","HUC12","Name","ID","Section","date","sum"],// 
+  fileFormat: 'CSV'
+}); 
