@@ -1,0 +1,372 @@
+// This code has been updated to use the Landsat Collection 2 data (name changes 
+// to the bands and includes a scaling factor and offset)
+// The code doesn't harmonize L5 and L7 with L8 but the differences are minimal.  
+// 
+// Inputs are 1. single shapefile/polygon of your region of interest and 
+// 2. an optional user created point named "check" used to spot check individual 
+// pixel timeseries (created on map below and renamed above)
+//
+// Output is a raster of Mann Kendall outputs by pixel and graphs displayed on the console
+
+
+// ======= define user variables ======
+
+var roi = matheson
+var startYear = 1993;
+var endYear = 2022;
+var startMonth = 5
+var endMonth = 6
+var threshold = 0.01 //p value threshold that counts as significant
+var endDate = '2022-12-31' //last date needed for analysis. Used to filter L8 images
+var fileName = 'medianNDVIJuly15Aug319221LandsatMathesonSlope_Test_p01'
+var folderName = 'Matheson'
+
+Map.addLayer(ee.Image().paint(roi, 1, 2), null, 'roi'); // <--- display and check wetPoly
+
+ 
+//=== helper functions =====================================================
+
+var bandRenamel8 = function(image){
+  var rename = image.select(['SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6', 'SR_B7'],
+  ['B1', 'B2', 'B3', 'B4', 'B5', 'B7']);
+  return rename;
+};
+
+var bandRenamel57 = function(image){
+  var rename = image.select(['SR_B1', 'SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B7'],
+  ['B1', 'B2', 'B3', 'B4', 'B5', 'B7']);
+  return rename;
+};
+
+//Outdated bitmask name and bits
+/*var cloudMask = function(image){
+  var quality =image.select(['pixel_qa']);
+  // clear = no clouds, coud shadow, or snow
+  var clear = quality.bitwiseAnd(8).eq(0) // cloud shadow
+                .and(quality.bitwiseAnd(32).eq(0)) // cloud
+                .and(quality.bitwiseAnd(16).eq(0)); // snow
+  image = image.mask(clear);
+  return image;
+};  
+*/
+var cloudMaskl8 = function(image){
+  var quality =image.select(['QA_PIXEL']);
+  // clear = no clouds, coud shadow, or snow-could also include dilated clouds but I'm not since the other Landats don't have that option
+  var clear = quality.bitwiseAnd(16).eq(0) // cloud shadow
+                .and(quality.bitwiseAnd(8).eq(0)) // cloud
+                .and(quality.bitwiseAnd(32).eq(0)); // snow
+  image = image.mask(clear);
+  return image;
+};  
+
+
+
+function applyScaleFactors(image) {
+  var opticalBands = image.select('SR_B.').multiply(0.0000275).add(-0.2);
+  var thermalBands = image.select('ST_B.*').multiply(0.00341802).add(149.0);
+  return image.addBands(opticalBands, null, true)
+              .addBands(thermalBands, null, true);
+}
+
+
+var ndviCalc = function(x) {
+  var ndvi = x.normalizedDifference(['B4', 'B3']);
+  ndvi = ndvi.select([0], ['ndvi']);
+  var imageDate = x.get('system:time_start');
+  return ndvi.set('system:time_start', imageDate);
+};
+
+var createTimeBand = function(img){
+  var year = img.date().difference(ee.Date('1992-01-01'), 'year'); //change based on first date, could change to month
+  return ee.Image(year).float().addBands(img);
+};
+
+var NDVIParam = {
+  bands: ["slope_median"],
+  max: 0.0432,//change min and max based on your individual datasest!!! Explore in the display settings
+  min: -0.0432,
+  opacity: 1,
+  palette: ["ff2f00","ffffff","23e400"]
+}
+
+//============================================================================
+//    create imageCollection - filter landsat l5, l7, l8, and merge 
+//============================================================================
+{
+var periodl5 = ee.ImageCollection('LANDSAT/LT05/C02/T1_L2')
+    .filterBounds(roi.geometry()) //geometry().//.bounds()
+  .filter((ee.Filter.date('1984-01-01', '2011-12-31')))
+  .map(cloudMaskl8)
+  .map(applyScaleFactors)
+  .map(bandRenamel57);
+//print(periodl5, 'periodl5');
+
+var periodl7 = ee.ImageCollection('LANDSAT/LE07/C02/T1_L2')
+    .filterBounds(roi.geometry()) //.bounds()
+  .filter((ee.Filter.date('2012-01-01', '2012-12-31')))
+  .map(cloudMaskl8)
+  .map(applyScaleFactors)
+  .map(bandRenamel57);
+// print(periodl7, 'periodl7');
+
+var periodl8 = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+    .filterBounds(roi.geometry()) //.bounds()
+  .filter((ee.Filter.date('2013-01-01', endDate)))
+  .map(cloudMaskl8)
+  .map(applyScaleFactors)
+  .map(bandRenamel8);
+//print(periodl8, 'periodl8');
+
+var period = ee.ImageCollection(periodl5.merge(periodl7).merge(periodl8)); 
+// print (period);
+}
+
+//============================================================================
+//    generate annual ndvi within Matheson boundary 1993-2022
+//============================================================================
+
+
+var visParams={min: -0.04, max: 0.04, palette:['#f0280a','#fffb00', '#11cf27']}
+
+var ndvi = ee.ImageCollection(period)
+  .filterDate(startYear.toString(), (endYear +1).toString())
+  .filter(ee.Filter.calendarRange(startMonth,endMonth,'month'))//calendarRange(8,9,'month'))//dayOfYear(196,243))
+  .select(['B3','B4'])
+  .map(ndviCalc);
+
+print(ndvi,'ndviCollection');//.limit(10)
+
+var years = ee.List.sequence(startYear, endYear); 
+print(years, 'years');
+
+var ndviAnnual = ee.ImageCollection.fromImages(years.map(function(x){ 
+  var yearCollection = ndvi
+  .filter(ee.Filter.calendarRange(x, x, 'year'));
+  // var date = ee.Date(yearCollection
+  // .first()
+  // .get('system:time_start'))
+  // .format('YYYY');
+  var time = yearCollection
+  .first()
+  .get('system:time_start');
+  var yearNDVI = yearCollection
+  .mean()
+  // .select([0], [ee.String('').cat(date)])
+  .set({year:x})
+  .set({'system:time_start':time});
+  return yearNDVI;
+}));
+
+print(ndviAnnual, 'ndviAnnual');
+
+var ndviAnnual1000 = ndviAnnual.map(function(image){
+  return image.multiply(1000).set('system:time_start',image.get('system:time_start'))
+})
+//print(ndviAnnual1000)
+print(ndviAnnual,"check magnitude")
+//Map.addLayer(ndviAnnual.first())
+
+//============================================================================
+//    reduce and export annual mean max NDVI within Matheson preserve
+//============================================================================
+
+var ndviAnnualImg = ee.ImageCollection(ndviAnnual.iterate( 
+  function (image, previous) {
+    return ee.Image(previous).addBands(image);
+  },
+  ee.Image([])));
+  
+print(ndviAnnualImg,'ndviAnnualImg');
+  
+var ndviReduced = ee.Image(ndviAnnualImg) //<--- sum area esimates by regions for each year
+    .reduceRegions({
+      collection: roi,
+      reducer: ee.Reducer.mean(),
+      scale: 30,
+      crs: 'EPSG:4326',
+      tileScale: 5 //<--- change tile scale if memory errors occur
+    });
+    
+var ndviNoGeo = ndviReduced.map(function(feature) {   // <- remove geometry for export
+      return ee.Feature(feature.select([".*"], null, false));
+    });   
+
+// print(wetAreaImgnoGeo.limit(1),'wetAreaImgnoGeo');
+
+//Export.table.toDrive({
+//   folder: 'ShorelandsPreserve', // <-- change destination folder name here
+//   collection: ndviNoGeo,
+//   description:'ShorelandsMaxMayNDVI', // <-- change file name here
+//   fileFormat: 'CSV'
+// }); 
+
+//============================================================================
+//    Mann Kendall
+//============================================================================
+
+var afterFilter = ee.Filter.lessThan({
+  leftField: 'system:time_start',
+  rightField: 'system:time_start'
+});
+
+var joined = ee.ImageCollection(ee.Join.saveAll('after').apply({
+  primary: ndviAnnual,
+  secondary: ndviAnnual,
+  condition: afterFilter
+}));
+
+
+var sign=function sign(a, b) {
+    return a.expression("diff < 0 ? -1 : (diff > 0 ? 1 : 0)", {
+        diff: a.subtract(b)
+    })
+};
+
+/*var sign = function(i, j) { // i and j are images
+  return ee.Image(j).neq(i) // Zero case
+      .multiply(ee.Image(j).subtract(i).clamp(-1, 1));//.int()
+};*/
+
+var kendall = ee.ImageCollection(joined.map(function(current) {
+  var afterCollection = ee.ImageCollection.fromImages(current.get('after'));
+  return afterCollection.map(function(image) {
+    // The unmask is to prevent accumulation of masked pixels that
+    // result from the undefined case of when either current or image
+    // is masked.  It won't affect the sum, since it's unmasked to zero.
+    return ee.Image(sign(current, image)).unmask(0);
+  });
+  // Set parallelScale to avoid User memory limit exceeded.
+}).flatten()).reduce('sum', 2);
+
+var palette = ['red', 'white', 'green'];
+// Stretch this as necessary.
+Map.addLayer(kendall.clip(roi), {palette: palette}, 'kendall',false);
+
+//Sen's slope
+var slope = function(i, j) { // i and j are images
+  return ee.Image(j).subtract(i)
+      .divide(ee.Image(j).date().difference(ee.Image(i).date(), 'years'))
+      .rename('slope')
+      .float();
+};
+
+var slopes = ee.ImageCollection(joined.map(function(current) {
+  var afterCollection = ee.ImageCollection.fromImages(current.get('after'));
+  return afterCollection.map(function(image) {
+      return ee.Image(slope(current, image));
+  });
+}).flatten());
+
+var sensSlope = slopes.reduce(ee.Reducer.median(), 2); // Set parallelScale.
+Map.addLayer(sensSlope.clip(roi), {palette: palette}, 'sensSlope',false);
+
+///MK Variance
+
+
+// Values that are in a group (ties).  Set all else to zero.
+var groups = ndviAnnual.map(function(i) {
+  var matches = ndviAnnual.map(function(j) {
+    return i.eq(j); // i and j are images.
+  }).sum();
+  return i.multiply(matches.gt(1));
+});
+
+// Compute tie group sizes in a sequence.  The first group is discarded.
+var group = function(array) {
+  var length = array.arrayLength(0);
+  // Array of indices.  These are 1-indexed.
+  var indices = ee.Image([1])
+      .arrayRepeat(0, length)
+      .arrayAccum(0, ee.Reducer.sum())
+      .toArray(1);
+  var sorted = array.arraySort();
+  var left = sorted.arraySlice(0, 1);
+  var right = sorted.arraySlice(0, 0, -1);
+  // Indices of the end of runs.
+  var mask = left.neq(right)
+  // Always keep the last index, the end of the sequence.
+      .arrayCat(ee.Image(ee.Array([[1]])), 0);
+  var runIndices = indices.arrayMask(mask);
+  // Subtract the indices to get run lengths.
+  var groupSizes = runIndices.arraySlice(0, 1)
+      .subtract(runIndices.arraySlice(0, 0, -1));
+  return groupSizes;
+};
+
+// See equation 2.6 in Sen (1968).
+var factors = function(image) {
+  return image.expression('b() * (b() - 1) * (b() * 2 + 5)');
+};
+
+var groupSizes = group(groups.toArray());
+var groupFactors = factors(groupSizes);
+var groupFactorSum = groupFactors.arrayReduce('sum', [0])
+      .arrayGet([0, 0]);
+
+var count = joined.count();
+
+var kendallVariance = factors(count)
+    .subtract(groupFactorSum)
+    .divide(18)
+    .float();
+Map.addLayer(kendallVariance.clip(roi), {}, 'kendallVariance',false);
+
+//P values
+// Compute Z-statistics.
+var zero = kendall.multiply(kendall.eq(0));
+var pos = kendall.multiply(kendall.gt(0)).subtract(1);
+var neg = kendall.multiply(kendall.lt(0)).add(1);
+
+var z = zero
+    .add(pos.divide(kendallVariance.sqrt()))
+    .add(neg.divide(kendallVariance.sqrt()));
+Map.addLayer(z, {min: -2, max: 2}, 'z',false);
+
+// https://en.wikipedia.org/wiki/Error_function#Cumulative_distribution_function
+function eeCdf(z) {
+  return ee.Image(0.5)
+      .multiply(ee.Image(1).add(ee.Image(z).divide(ee.Image(2).sqrt()).erf()));
+}
+
+function invCdf(p) {
+  return ee.Image(2).sqrt()
+      .multiply(ee.Image(p).multiply(2).subtract(1).erfInv());
+}
+
+// Compute P-values.
+var p = ee.Image(1).subtract(eeCdf(z.abs()));
+Map.addLayer(p, {min: 0, max: 1}, 'p',false);
+
+// Pixels that can have the null hypothesis (there is no trend) rejected.
+// Specifically, if the true trend is zero, there would be less than 5%
+// chance of randomly obtaining the observed result (that there is a trend).
+Map.addLayer(p.lte(threshold).clip(roi), {min: 0, max: 1}, 'significant trends',false);
+
+//Show Sen's slopes that are significant
+
+var sigSens= sensSlope.updateMask(p.lte(threshold))
+Map.addLayer(sigSens.clip(roi),NDVIParam, 'significant sensSlope')//
+
+Export.image.toDrive({
+  image: sigSens.clip(roi),
+  description: fileName,
+  folder: folderName,
+  scale: 30,
+  crs:'EPSG:26912',
+  region: roi,
+  maxPixels: 1e13
+});
+
+var chart =
+    ui.Chart.image
+        .series({//ByRegion
+          imageCollection: ndviAnnual,
+          //band: 'ndvi',
+          region: check,
+          reducer: ee.Reducer.median(),
+          scale: 30,
+          //seriesProperty: 'coordinates',
+          xProperty: 'system:time_start'
+        })
+
+print(chart);
