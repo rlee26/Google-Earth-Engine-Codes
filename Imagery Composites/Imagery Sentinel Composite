@@ -1,0 +1,103 @@
+/*
+Author: Rebecca Molinari
+Date: 4/19/2023
+
+
+This code masks out clouds and then displays and exports a Sentinel median composite image for the 
+time specified. Exports a tif file to the specified 
+folder. 
+
+The cloud mask currently masks out high probability clouds, medium 
+probability clouds, cloud shadows, cirrus. You can edit 
+that function to filter out more like low probability clouds.
+
+
+*/
+
+//======user defined variables==============================================
+
+//var startDate = ee.Date('2021-01-01')//see commented out code on line 121 if you only want to run based on date instead of calendar range
+//var endDate = ee.Date('2022-12-31')
+var startMonth = 11 //
+var endMonth = 11
+var startYear = 2022
+var endYear= 2022
+//var cloudROIPercentThreshold = 10 //what percent of the roi can have clouds masked out and still be included in the timeseries
+var outputFolder = 'test'
+var outputFileName = 'Sentinel_WasatchFront_November2022_composite'
+
+//define roi
+var roi = geometry
+
+
+Map.addLayer(ee.Image().paint(roi, 1, 2), null, 'roi'); // <--- display and check Poly
+
+//=== helper functions =======================================================
+{
+//cloud mask
+var cloudMask = function(image){
+  var cloud = image.select('MSK_CLDPRB'); // <-- select masking bands
+  var scl = image.select('SCL');
+  
+  var shadow = scl.eq(3); // <-- filter SLC classes
+  var cirrus = scl.eq(10);
+  //var snowIce = scl.eq(11)
+  var cloud1 = scl.eq(9)
+  var cloud2= scl.eq(8)
+  
+  // var clear = cloud.lt(5).and(cirrus.neq(1).and(shadow.neq(1)).and(snowIce.neq(1))) // <-- combine
+ 
+ var clear = cloud1.neq(1).and(cirrus.neq(1).and(shadow.neq(1)).and(cloud2.neq(1))) // <-- combine//.and(snowIce.neq(1))
+
+  image = image.updateMask(clear); // <-- mask
+  return image.set('system:time_start', image.get('system:time_start'));
+};  
+
+//Clip to roi
+var clipCol = function(image){
+  var clipImage = image.clip(roi)
+  return clipImage
+}
+
+
+
+
+}
+
+//=========import Sentinel data and cloud mask
+
+var sent2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+  .filterBounds(roi) 
+  .filter(ee.Filter.calendarRange(startMonth,endMonth,'month'))
+  .filter(ee.Filter.calendarRange(startYear,endYear,'year'))
+  //.filter(ee.Filter.calendarRange(1,10,"DAY_OF_MONTH"))
+  //.filter(ee.Filter.calendarRange(01,15,'DAY_OF_MONTH'))
+  //  .filter((ee.Filter.date(startDate, endDate)))
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE',30))
+  .map(clipCol)
+  //.filterMetadata('CLOUD_COVERAGE_ASSESSMENT', 'less_than', 20)
+  //.map(cloudMask)
+  //.first()
+  .median()
+print(sent2, "sent2")
+
+// only use images that don't have a lot of clouds masked out for consistency
+var clip_filtered = sent2.select('B4','B3','B2')
+print(clip_filtered,"median RGB 2022")
+
+var visualization = {
+  min: 0.0,
+  max:3000,
+  bands: ['B4', 'B3', 'B2'],
+};
+Map.addLayer(clip_filtered,visualization, 'RGB')
+
+// Export the image, specifying the CRS, transform, and region.
+Export.image.toDrive({
+  image: clip_filtered,
+  description: outputFileName,
+  folder: outputFolder,
+  crs: 'EPSG:26912',
+  scale:30,
+  region: geometry
+});
