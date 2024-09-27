@@ -1,0 +1,290 @@
+/* 
+Author: Rebecca Molinari
+8/18/2023
+
+This code takes Planet PSScene analytic_8b_sr_udm2 imagery (can have clouds, 
+code masks them out) and calculates 3 vegetation indices (NDVI, CIRE, and OSAVI) 
+for each polygon in a shapefile. Output is a csv file. Cloud mask is currently 
+set to mask out snow, clouds, cloud shadows, light haze, heavy haze. The cloud mask
+masks out clouds well but not haze so try not to include images with a lot of haze
+(or maybe cirrus clouds). You can run for a single polygon the site column will 
+just be blank.
+
+If you have a lot of polgyons you can comment out the chart code at the bottom 
+of this code since there will be too much data to visualize well.
+
+For the daily composite code I used a function that was already written by Samapriya Roy
+Copyright (c) 2020 Samapriya Roy. All rights reserved.
+This work is licensed under the terms of the Apache 2 license.  
+For a copy, see <https://www.apache.org/licenses/LICENSE-2.0>.
+Cite using:
+Samapriya Roy. (2020, May 7). samapriya/cloud-utils: cloud-utils: Cloud utils for Planet UDM-2 (Version 0.2). Zenodo.
+http://doi.org/10.5281/zenodo.3813171
+
+*/
+
+//======user defined variables==============================================
+ 
+//var startDate = ee.Date('2021-01-01')//see commented out code on line 129 if you only want to run based on date instead of calendar range
+//var endDate = ee.Date('2022-12-31')
+var imageCollection_planet = pahvant_cloudTest//pahvant_cloudTest
+var startMonth = 6 
+var endMonth = 6
+var startYear = 2022
+var endYear= 2022
+var outputFolder = 'test'
+var outputFileName = 'Planet_medianIndices_Pahvant_cloudTest'
+var siteNameColumn = "luid"//unique site id column from shapefile
+var cloudROIPercentThreshold = 2 //the number is a percent. Percent of aoi that can be masked out before not including the year in the timeseries
+//define roi
+var roi = Pahvant_ag//ProjectAreas.filter(ee.Filter.eq("POLYGON","Mud Spring 1"))
+
+// Define the visualization parameters. Update on map for specific image
+var RGBVisParam = {
+  bands: ['B6', 'B4', 'B2'],
+  min: 220,
+  max: 3245,
+  gamma: 1
+};
+
+Map.addLayer(ee.Image().paint(roi, 1, 2), null, 'roi'); // <--- display and check Poly
+
+//=== helper functions =======================================================
+{
+
+
+//Clip to roi
+var clipCol = function(image){
+  var clipImage = image.clip(roi)
+  return clipImage
+}
+
+var addNDVI = function(image) {
+  var ndvi = image.normalizedDifference(['B8', 'B6']).rename('NDVI');
+  return image.addBands(ndvi);
+};
+
+var addCIredEdge = function(image){
+  //Create band variables
+  var redEdge = image.select('B7');
+  var NIR = image.select('B8');
+  var CIredEdge = NIR.divide(redEdge).subtract(1).rename('CIRE');
+    return image.addBands(CIredEdge);
+};
+
+var addOSAVI = function (image) {
+  var nir = image.select(['B8']);
+  var red = image.select(['B6']);
+  var osavi = nir.subtract(red).divide(nir.add(red).add(0.16)).rename('OSAVI');//.multiply(1.16) //some websites say to multiply by 1.16 and others don't
+return image.addBands(osavi);
+}
+
+//cloud mask
+var cloudMask = function(image){
+ var snow = image.select("Q2")
+ var shadow = image.select('Q3')
+ var lightHaze = image.select("Q4")
+ var heavyHaze = image.select("Q5")
+ var clouds = image.select('Q6')
+ var clear = clouds.neq(1).and(lightHaze.neq(1).and(shadow.neq(1)).and(snow.neq(1)).and(heavyHaze.neq(1))) // <-- combine
+
+  image = image.updateMask(clear); // <-- mask
+  return image.set('system:time_start', image.get('system:time_start'));
+};
+}
+
+//===========Set map options======= 
+Map.centerObject(roi.geometry(),12)
+Map.setOptions('HYBRID')
+
+//============ Bring in imagery and cloud mask======
+
+var clearCollection = imageCollection_planet.map(cloudMask)
+print(clearCollection)
+
+Map.addLayer(imageCollection_planet,RGBVisParam,"with clouds")
+Map.addLayer(clearCollection,RGBVisParam,"clouds masked")
+
+//Get required module
+var cloudy= require('users/samapriya/utils:cloud-utils')
+
+//Import the Planet UDM-2 Sample collection
+var udm2collection=clearCollection;
+print('Total udm-2 images in collection',udm2collection.size())
+
+//Get collection with daily composites
+var daily_max=cloudy.dailymax(udm2collection)
+print('Daily Max Composite',daily_max)
+
+var daily_median=cloudy.dailymedian(udm2collection)//Using median for this code
+print('Daily Median Composite',daily_median)
+
+Map.addLayer(daily_median.first().clip(roi),RGBVisParam,'Daily median composite first image',false)
+
+//=========filter cleaned Planet imagery collection
+
+var planet2 = daily_median
+  .filterBounds(roi.geometry()) 
+  .filter(ee.Filter.calendarRange(startMonth,endMonth,'month'))
+  .filter(ee.Filter.calendarRange(startYear,endYear,'year'))//  .filter((ee.Filter.date(startDate, endDate)))
+  .map(clipCol)
+  //.filterMetadata('CLOUD_COVERAGE_ASSESSMENT', 'less_than', 20)
+  //.filterMetadata('CLOUDY_PIXEL_PERCENTAGE','less_than',20)
+  //.map(cloudMask);
+
+print(planet2, "Planet Collection")
+
+//========calculate all three indices
+
+var indexPlanet = planet2
+    .map(addNDVI)
+    .map(addCIredEdge)
+    .map(addOSAVI)
+    .select(['NDVI','CIRE','OSAVI'])
+print(indexPlanet,"indexPlanet")
+
+//=========loop function====  
+
+var loopFunction = function(feature){  
+  var aoi = feature.geometry()
+  
+  //Clip to roi
+  var clipCol = indexPlanet.map(function(image){ //clipping for cloud roi calculation
+   var clipImage = image.clip(aoi)
+   return clipImage
+  })
+
+  //filter by masked cloud cover
+  var get_cloud_cover_roi= clipCol.map(function(image){ 
+
+    var pixelscount = image.select('B4').reduceRegion({
+      reducer: ee.Reducer.count(),
+      geometry: aoi,//.geometry(),
+      scale: 3,
+      maxPixels: 1e9
+    }).get('B4')
+
+    var npix = image.select('B4').unmask().reduceRegion({
+      reducer: ee.Reducer.count(),
+      geometry: aoi,//.geometry(),
+      scale: 3,
+      maxPixels: 1e9
+   }).get('B4')
+
+    var cloud_cover_roi = ee.Number(1)
+       .subtract(ee.Number(pixelscount).divide(npix))
+       .multiply(100)
+
+    return image.set('cloud_cover_roi', cloud_cover_roi)
+
+  })
+
+
+  // only use images that don't have a lot of clouds masked out for consistency
+  var clip_filtered = get_cloud_cover_roi
+      .filterMetadata('cloud_cover_roi', 'less_than', cloudROIPercentThreshold) //the number is a percent
+
+  //reduce by aoi and convert to table 
+
+  var reduceByAOI = indexPlanet.map(function(image){
+    var date = ee.Date(image.get('system:time_start')).format('YYYY-MM-dd')
+   var site = feature.get(siteNameColumn)
+  
+   var reduced = image
+    .reduceRegion({
+      reducer: ee.Reducer.median(),
+      geometry: aoi,
+      scale: 3,
+      bestEffort: true
+   })
+   return ee.Feature(null, {'NDVI':reduced.get('NDVI'), 'OSAVI':reduced.get('OSAVI'),'CIRE':reduced.get('CIRE'),'date':date,'site':site})
+  } )
+  
+  return reduceByAOI
+  
+  }
+  
+
+
+//=========Run loop to calculate indices=====
+var runLoop = roi.map(loopFunction).flatten()
+
+print(runLoop,"output")
+
+//=========Export csv to Google Drive=====
+Export.table.toDrive({
+  collection:runLoop,
+  description:outputFileName,
+  folder: outputFolder,
+  fileFormat: 'CSV',
+  selectors: ["site","date","NDVI","OSAVI", "CIRE"]
+})
+
+
+//=========Graph regions time series========
+// Define the chart and print it to the console.
+var chart =
+    ui.Chart.image
+        .seriesByRegion({
+          imageCollection: indexPlanet.select('NDVI'),
+          regions: roi,
+          reducer: ee.Reducer.median(),
+          seriesProperty: siteNameColumn,
+          scale: 3,
+          xProperty: 'date'
+        })
+        //.setSeriesNames(['CIRE', 'NDVI','OSAVI'])
+        .setOptions({
+          title: 'Median NDVI Value by Date for roi',
+          hAxis: {title: 'Date', titleTextStyle: {italic: false, bold: true}},
+          vAxis: {
+            title: 'Vegetation index',
+            titleTextStyle: {italic: false, bold: true}
+          },
+          //lineWidth: 5,
+          //colors: ['e37d05', '1d6b99','black'],
+          //curveType: 'function'
+        });
+print(chart);
+
+// Define the chart and print it to the console.
+var chart =
+    ui.Chart.image
+        .seriesByRegion({
+          imageCollection: indexPlanet.select('CIRE'),
+          regions: roi,
+          reducer: ee.Reducer.median(),
+          seriesProperty: siteNameColumn,
+          scale: 3,
+          xProperty: 'date'
+        })
+        //.setSeriesNames(['CIRE', 'NDVI','OSAVI'])
+        .setOptions({
+          title: 'Median CIRE Value by Date for roi',
+          hAxis: {title: 'Date', titleTextStyle: {italic: false, bold: true}},
+          vAxis: {
+            title: 'Vegetation index',
+            titleTextStyle: {italic: false, bold: true}
+          },
+          //lineWidth: 5,
+          //colors: ['e37d05', '1d6b99','black'],
+          //curveType: 'function'
+        });
+print(chart);
+
+
+
+
+
+
+//Extra code
+/*var daily_quality_composite=cloudy.dailyquality(udm2collection,'Q6')//not sure what this is or if set up correctly
+print('Daily Quality Composite',daily_quality_composite)
+
+var daily_percentile=cloudy.dailypercentile(udm2collection,10)
+print('Daily Percentile Composite',daily_percentile)
+Map.addLayer(daily_max.first().clip(roi),vis,'Daily Max Composite',false)
+Map.addLayer(daily_quality_composite.first().clip(roi),vis,'Daily Quality Composite',false)
+Map.addLayer(daily_percentile.first().clip(roi),vis,'Daily Percentile Composite',false)
+
+*/
