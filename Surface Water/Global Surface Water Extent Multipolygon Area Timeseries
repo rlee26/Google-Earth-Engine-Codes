@@ -1,0 +1,64 @@
+// Rebecca Molinari
+// This code exports a csv of the surface water area within each polygon in the input shapefile for every year 
+var monthlyWater = ee.ImageCollection("JRC/GSW1_4/MonthlyHistory")
+var gsw = ee.Image("JRC/GSW1_4/GlobalSurfaceWater")
+
+//=== User defined variables========
+var siteColumn = 'ID'//column name of site names from import shapefile
+var shapefile = table // shapefile with all the polygons you want water area of
+var fileName = "ReprojectSurfaceAreaTest" // output file name
+var folderName = 'Test'// output folder name
+var startMonth = 5
+var endMonth = 9
+
+var loopFunction = function(feature){
+var roi = feature.geometry().transform('EPSG:5070',.01);
+
+var seasonality = monthlyWater
+  .filter(ee.Filter.calendarRange(startMonth,endMonth,'month'))
+  .map (function(image){
+  var mask = gsw.select('max_extent')
+  .eq(1)
+  .clip(roi);
+  
+  return image.updateMask(mask);
+});
+
+function areaByClass(image) {  
+  var classNames = ee.List(['No Data', 'Not Water', 'Water']);
+  var groups = ee.Image.pixelArea().addBands(image)
+    .reduceRegion({ 
+      reducer: ee.Reducer.sum()
+        .group({ groupField: 1, groupName: 'water', }), 
+      geometry: roi, 
+      scale: 30,
+      crs:'EPSG:5070' ,
+      bestEffort: true,
+    }).get('groups');
+  var areaByClassDict = ee.Dictionary(
+    ee.List(groups).map(function (group) {
+      group = ee.Dictionary(group);
+      return [
+        classNames.get(group.getNumber('water')),
+        group.getNumber('sum')//.divide(1e6) // square km 
+      ];
+    }).flatten()
+  );
+  return ee.Feature(null, areaByClassDict.set('date',image.get('system:index')).set('site',feature.get(siteColumn)));
+}
+var areas = seasonality
+  .map(areaByClass); 
+var featureWaterArea = ee.FeatureCollection(seasonality.map(areaByClass))//.set('ProjID',feature.get('Project_ID')).set('NDVI',feature.get('NDVI'))
+return featureWaterArea;
+};
+
+var testOutput = table.map(loopFunction);
+//print(testOutput,"test Output");
+
+Export.table.toDrive({
+  collection: testOutput.flatten(),
+  description: fileName,
+  folder: folderName,
+  fileFormat: 'CSV',
+  selectors:["system:index","No Data","Not Water", "Water", "date", "site"],
+});
