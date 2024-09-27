@@ -1,0 +1,66 @@
+// Adapted by Rebecca Molinari
+
+// Author: Eric Jensen and Matt Jones, Working Lands for Wildlife, University of Montana
+// Contact: Sarah McCord (sarah.mccord@usda.gov)
+// Date: January 1, 2022
+// Purpose of script: This script exports RAP Vegetation Cover tables (CSV file format) for multiple regions of interest from Google Earth Engine to your personal Google Drive
+// Supporting article: https://rangelands.app/support/64-batch-export-vegetation-cover-csvs
+
+
+// ------------------------------------------------------------
+// -------------- Variables for user to change ----------------
+// ------------------------------------------------------------
+var roi= geometry
+var fileName = 'RAP_TreeCover'
+var folderName = 'Matheson_2'
+// ---------------- Notes to user ----------------
+// Follow the instructions in the "Supporting article" linked above for uploading and importing your shapefile. 
+// Once you have imported your shapefile and changed the variable name to "table", no other alterations are required to the script.
+
+
+// ----------------------------------------------------------------------
+// -------------- Do not edit anything below this header ----------------
+// ----------------------------------------------------------------------
+
+// Select PFTs of interest and filter by date
+var coverSubset = cover.select(['AFG','PFG', 'LTR', 'SHR', 'TRE', 'BGR'])
+  // Uncomment next line to filter dates
+  // .filterDate('1984-01-01','2021-01-01')
+
+// Parameters to visualize the data in the map panel; not essential but helpful
+// Define a color palette
+var paletteVis = ['#EEE714', '#ABFFF3', '#51FF31', '#1DB328']
+// Define band to visualize and the min/max (stretch) for color palette
+var visParams = {bands:['TRE'], min: 0, max: 50, palette: paletteVis}
+
+// Add layers to map
+Map.addLayer(coverSubset, visParams, 'Land Cover')
+Map.addLayer(roi, null, 'Imported shapefile')
+
+// Function that uses reduceRegions 
+// This function will be mapped over each image in the collection
+var rRegions = function(img){
+  var result = img.reduceRegions({
+      collection: roi,  // the shapefile that will be used to calculate statistics 
+      reducer: ee.Reducer.mean(),  // calculate a mean for each polygon, use other reducers for other stats
+      crs: 'EPSG:4326', 
+      scale: 30,
+      tileScale: 16
+    });
+  return result
+}
+
+// Map the function across the image collection
+var reductionResult = coverSubset.map(rRegions).map(function(f){
+  var year = ee.Number(f.get('system:index'))
+  return(f.set('Year', year))
+})
+
+
+// Export the sampled means to a csv
+Export.table.toDrive({
+  collection: reductionResult.flatten(),
+  description: fileName,
+  folder: folderName,
+  fileFormat: 'CSV'
+});
